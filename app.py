@@ -213,12 +213,14 @@ def render_results(results_com: List[str], results_others: List[str], processed_
 # -------------------- BRANDABLES --------------------
 VOWELS = set("aeiouy")
 
+# HUOM: nyt nämä ovat "täyden" C/V-kuvion vaihtoehtoja (ei tiivistetty).
 DEFAULT_ALLOWED_RUN_PATTERNS = [
-    # Tiivistetty C/V-runko (peräkkäiset samaan supistetaan)
-    "CV", "VC", "CVC", "VCV",
+    "CV", "VC",
+    "CVC", "VCV",
     "CVCV", "VCVC",
+    "CVCCV", "VCCV",
+    "CVVC", "CVV", "VVC",   # (valinnaisia; voit poistaa jos et halua)
     "CVCVC", "VCVCV",
-    "CVCCV", "CCVCV",
     "CVCVCV", "VCVCVC",
 ]
 
@@ -232,16 +234,9 @@ BAD_BIGRAMS = {
     "qh", "qk", "qc", "qg", "qt", "qd", "qb",
 }
 
-def cv_run_pattern(s: str) -> str:
-    """Muuntaa merkkijonon C/V-runkoiseksi ja tiivistää peräkkäiset samaan."""
-    out = []
-    prev = None
-    for ch in s:
-        cur = "V" if ch in VOWELS else "C"
-        if cur != prev:
-            out.append(cur)
-            prev = cur
-    return "".join(out)
+def cv_full_pattern(s: str) -> str:
+    """Täysi C/V-kuvio (ei tiivistystä). Esim. 'boon' -> CVVC."""
+    return "".join("V" if ch in VOWELS else "C" for ch in s)
 
 def has_repeated_chunk(s: str, chunk_min: int = 2, repeats: int = 3) -> bool:
     """Etsii toistuvia paloja (kakaka/akakaka)."""
@@ -253,6 +248,7 @@ def has_repeated_chunk(s: str, chunk_min: int = 2, repeats: int = 3) -> bool:
 def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
     """
     Palauttaa (score, run_pattern). Score korkeampi = parempi.
+    run_pattern on nyt TÄYSI C/V-kuvio.
     """
     s = s.lower()
 
@@ -292,9 +288,9 @@ def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
     if len(set(s)) < settings["min_unique_chars"]:
         return -999, ""
 
-    run_pat = cv_run_pattern(s)
+    run_pat = cv_full_pattern(s)
 
-    # Runko-rajoitin (tiivistetty)
+    # Runko-rajoitin (täysi kuvio)
     allowed: Set[str] = settings["allowed_run_patterns"]
     if allowed and run_pat not in allowed:
         return -50, run_pat
@@ -330,12 +326,12 @@ def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
         score -= 12
 
     # Monotoninen CV-vuorottelu pitkästi (kakakaka)
-    full_pat = "".join("V" if c in VOWELS else "C" for c in s)
+    full_pat = run_pat  # täysi kuvio
     if re.search(r"(CV){4,}", full_pat) or re.search(r"(VC){4,}", full_pat):
         score -= 18
 
-    # Bonus muutamille “usein hyviltä tuntuville” runkomuodoille
-    if run_pat in {"CVC", "CVCV", "CVCVC", "CVCCV"}:
+    # Bonus muutamille “usein hyviltä tuntuville” muodoille
+    if run_pat in {"CVCV", "CVCCV", "CVVC", "VCCV", "CVCVC"}:
         score += 6
 
     return score, run_pat
@@ -473,9 +469,9 @@ def main():
         )
 
         allowed = st.multiselect(
-            "Sallitut tiivistetyt C/V-runko-variantit (esim. CVCV)",
+            "Sallitut C/V-kuviot (täysi kuvio, esim. CVVC, VCCV)",
             options=DEFAULT_ALLOWED_RUN_PATTERNS,
-            default=["CVC", "CVCV", "CVCVC", "CVCCV", "CCVCV"],
+            default=["CVCV", "CVCCV", "CVVC", "VCCV", "CVCVC"],
         )
 
         include_score = st.checkbox("Sisällytä score downloadiin (TAB-eroteltu)", value=True)
