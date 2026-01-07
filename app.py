@@ -45,25 +45,38 @@ def get_sld_and_tld(domain: str) -> Tuple[Optional[str], Optional[str]]:
         tld = parts[-1]
         sld = parts[-2]
 
+    # Puhdista sld kaikesta paitsi a-z ja -
     sld_clean = re.sub(r"[^a-z\-]", "", sld)
     if not sld_clean or not tld:
         return None, None
     return sld_clean, tld
 
 
+def is_exact_word(sld: str, word_set: set[str]) -> bool:
+    """Täsmäosuma: vain yksi sana, ei väliviivaa eikä yhdistelmiä."""
+    if not sld:
+        return False
+    if "-" in sld:
+        return False
+    return sld in word_set
+
+
 def is_valid_english_combo(sld: str, word_set: set[str]) -> bool:
+    """Laaja: yksi sana, väliviiva-yhdistelmä, tai kahden sanan concat."""
     if not sld:
         return False
 
+    # 1) Yksi sana
     if sld in word_set:
         return True
 
+    # 2) Väliviiva (word-word)
     if "-" in sld:
         parts = [p for p in sld.split("-") if p]
         if len(parts) >= 2 and all(p in word_set for p in parts):
             return True
 
-    # two-word concat
+    # 3) Kahden sanan concat (wordword)
     for i in range(3, len(sld) - 2):
         if sld[:i] in word_set and sld[i:] in word_set:
             return True
@@ -111,7 +124,13 @@ def collect_inputs(uploaded_files) -> List[FileItem]:
                     continue
                 lower = name.lower()
                 if lower.endswith(".csv") or lower.endswith(".txt"):
-                    items.append(FileItem(name=name, suffix="." + lower.split(".")[-1], data=zf.read(info)))
+                    items.append(
+                        FileItem(
+                            name=name,
+                            suffix="." + lower.split(".")[-1],
+                            data=zf.read(info),
+                        )
+                    )
     else:
         for uf in uploaded_files:
             lower = uf.name.lower()
@@ -124,12 +143,16 @@ def collect_inputs(uploaded_files) -> List[FileItem]:
     return items
 
 
-def run_filter(files: List[FileItem], words: set[str]):
+def run_filter(files: List[FileItem], words: set[str], mode: str):
+    """
+    mode:
+      - "exact": vain täsmäsanat
+      - "broad": nykyinen laaja logiikka
+    """
     results_com: List[str] = []
     results_others: List[str] = []
     seen: set[str] = set()
 
-    # Arvio kokonaisriveistä progressia varten (kevyt arvio, ei pakollinen)
     total_lines_est = max(1, sum(max(1, f.data.count(b"\n")) for f in files))
     processed = 0
 
@@ -151,22 +174,58 @@ def run_filter(files: List[FileItem], words: set[str]):
             if full in seen:
                 continue
 
-            if is_valid_english_combo(sld, words):
-                seen.add(full)
-                if tld == "com":
-                    results_com.append(full)
-                else:
-                    results_others.append(full)
+            if mode == "exact":
+                ok = is_exact_word(sld, words)
+            else:
+                ok = is_valid_english_combo(sld, words)
+
+            if not ok:
+                continue
+
+            seen.add(full)
+            if tld == "com":
+                results_com.append(full)
+            else:
+                results_others.append(full)
 
     progress.progress(1.0)
     status.write("Valmis.")
     return results_com, results_others, processed, len(files)
 
 
+def render_results(results_com: List[str], results_others: List[str], processed_lines: int, processed_files: int, label: str):
+    st.subheader(f"Tulokset ({label})")
+    st.write(f"Käsitelty tiedostoja: **{processed_files}**")
+    st.write(f"Käsitelty rivejä (arvioitu domain-riveiksi): **{processed_lines}**")
+    st.write(f"Löydetyt .com: **{len(results_com)}**")
+    st.write(f"Löydetyt muut: **{len(results_others)}**")
+
+    com_text = "\n".join(results_com).encode("utf-8")
+    others_text = "\n".join(results_others).encode("utf-8")
+
+    st.download_button(
+        f"Lataa results_com_{label}.txt",
+        data=com_text,
+        file_name=f"results_com_{label}.txt",
+        mime="text/plain",
+    )
+    st.download_button(
+        f"Lataa results_others_{label}.txt",
+        data=others_text,
+        file_name=f"results_others_{label}.txt",
+        mime="text/plain",
+    )
+
+    with st.expander("Näytä esikatselu (ensimmäiset 200)"):
+        st.write("**.com**")
+        st.code("\n".join(results_com[:200]))
+        st.write("**others**")
+        st.code("\n".join(results_others[:200]))
+
+
 def main():
     st.set_page_config(page_title="Domain Filter", layout="centered")
     st.title("Domain-seulonta (Streamlit)")
-
     st.caption("Upload: useita .csv/.txt tai yksi .zip (sisällä .csv/.txt). Tuloksena .com ja muut erikseen.")
 
     try:
@@ -193,28 +252,18 @@ def main():
 
     st.write(f"Tiedostoja käsittelyyn: **{len(files)}** (aakkosjärjestyksessä)")
 
-    if st.button("Aja seulonta", type="primary"):
+    col1, col2 = st.columns(2)
+    run_exact = col1.button("Aja TÄSMÄ", type="primary")
+    run_broad = col2.button("Aja LAAJA")
+
+    if run_exact or run_broad:
+        mode = "exact" if run_exact else "broad"
+        label = "exact" if run_exact else "broad"
+
         with st.spinner("Seulotaan..."):
-            results_com, results_others, processed_lines, processed_files = run_filter(files, words)
+            results_com, results_others, processed_lines, processed_files = run_filter(files, words, mode=mode)
 
-        st.subheader("Tulokset")
-        st.write(f"Käsitelty tiedostoja: **{processed_files}**")
-        st.write(f"Käsitelty rivejä (arvioitu domain-riveiksi): **{processed_lines}**")
-        st.write(f"Löydetyt .com: **{len(results_com)}**")
-        st.write(f"Löydetyt muut: **{len(results_others)}**")
-
-        com_text = "\n".join(results_com).encode("utf-8")
-        others_text = "\n".join(results_others).encode("utf-8")
-
-        st.download_button("Lataa results_com.txt", data=com_text, file_name="results_com.txt", mime="text/plain")
-        st.download_button("Lataa results_others.txt", data=others_text, file_name="results_others.txt", mime="text/plain")
-
-        # Halutessa pieni esikatselu
-        with st.expander("Näytä esikatselu (ensimmäiset 200)"):
-            st.write("**.com**")
-            st.code("\n".join(results_com[:200]))
-            st.write("**others**")
-            st.code("\n".join(results_others[:200]))
+        render_results(results_com, results_others, processed_lines, processed_files, label=label)
 
 
 if __name__ == "__main__":
