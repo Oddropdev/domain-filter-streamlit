@@ -213,15 +213,23 @@ def render_results(results_com: List[str], results_others: List[str], processed_
 # -------------------- BRANDABLES --------------------
 VOWELS = set("aeiouy")
 
-# HUOM: nyt nämä ovat "täyden" C/V-kuvion vaihtoehtoja (ei tiivistetty).
+# Täysi C/V-kuvio (ei tiivistetty): reseptit 4–8 kirjaimeen
+# Esim. nanovian (8): n a n o v i a n -> C V C V C V V C = CVCVCVVC
 DEFAULT_ALLOWED_RUN_PATTERNS = [
-    "CV", "VC",
-    "CVC", "VCV",
-    "CVCV", "VCVC",
-    "CVCCV", "VCCV",
-    "CVVC", "CVV", "VVC",   # (valinnaisia; voit poistaa jos et halua)
-    "CVCVC", "VCVCV",
-    "CVCVCV", "VCVCVC",
+    # 4
+    "CVCV", "CVVC", "VCCV", "VCVC",
+
+    # 5
+    "CVCVC", "CVCCV", "CVCVV", "VCVCV", "VCCVC",
+
+    # 6
+    "CVCVCV", "CVCVVC", "CVCCVC", "CVCCVV", "VCVCVC", "VCCVCV",
+
+    # 7
+    "CVCVCVC", "CVCVVCV", "CVCVCVV", "CVCCVCV", "CVCCVVC", "VCCVCVC",
+
+    # 8 (sis. nanovian = CVCVCVVC)
+    "CVCVCVCV", "CVCVCVVC", "CVCVVCVC", "CVCCVCVC", "CVCCVVCV", "VCCVCVCV",
 ]
 
 # Tiukennukset: harvinaiset kirjaimet ja huonot bigramit
@@ -248,7 +256,7 @@ def has_repeated_chunk(s: str, chunk_min: int = 2, repeats: int = 3) -> bool:
 def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
     """
     Palauttaa (score, run_pattern). Score korkeampi = parempi.
-    run_pattern on nyt TÄYSI C/V-kuvio.
+    run_pattern on TÄYSI C/V-kuvio.
     """
     s = s.lower()
 
@@ -330,8 +338,19 @@ def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
     if re.search(r"(CV){4,}", full_pat) or re.search(r"(VC){4,}", full_pat):
         score -= 18
 
-    # Bonus muutamille “usein hyviltä tuntuville” muodoille
-    if run_pat in {"CVCV", "CVCCV", "CVVC", "VCCV", "CVCVC"}:
+    # Bonus resepteille 4–8 (sis. nanovian = CVCVCVVC)
+    if run_pat in {
+        # 4
+        "CVCV", "CVVC", "VCCV", "VCVC",
+        # 5
+        "CVCVC", "CVCCV", "CVCVV", "VCVCV", "VCCVC",
+        # 6
+        "CVCVCV", "CVCVVC", "CVCCVC", "CVCCVV", "VCVCVC", "VCCVCV",
+        # 7
+        "CVCVCVC", "CVCVVCV", "CVCVCVV", "CVCCVCV", "CVCCVVC", "VCCVCVC",
+        # 8
+        "CVCVCVCV", "CVCVCVVC", "CVCVVCVC", "CVCCVCVC", "CVCCVVCV", "VCCVCVCV",
+    }:
         score += 6
 
     return score, run_pat
@@ -450,8 +469,13 @@ def main():
 
     with st.expander("Brandables-asetukset", expanded=False):
         score_threshold = st.slider("Score-kynnys", min_value=-20, max_value=80, value=20, step=1)
-        min_len = st.slider("Min pituus", 3, 12, 5, 1)
-        max_len = st.slider("Max pituus", 4, 20, 10, 1)
+
+        # Oletukset 4–8
+        min_len = st.slider("Min pituus", 3, 12, 4, 1)
+        max_len = st.slider("Max pituus", 4, 20, 8, 1)
+        if max_len < min_len:
+            max_len = min_len
+
         vowel_min = st.slider("Vokaalisuhde min", 0.10, 0.70, 0.33, 0.01)
         vowel_max = st.slider("Vokaalisuhde max", 0.20, 0.85, 0.60, 0.01)
         max_consonant_run = st.slider("Max konsonanttijono (C-run)", 2, 5, 3, 1)
@@ -469,9 +493,9 @@ def main():
         )
 
         allowed = st.multiselect(
-            "Sallitut C/V-kuviot (täysi kuvio, esim. CVVC, VCCV)",
+            "Sallitut C/V-kuviot (täysi kuvio, 4–8 kirjainta; esim. CVVC, VCCV, CVCVCVVC)",
             options=DEFAULT_ALLOWED_RUN_PATTERNS,
-            default=["CVCV", "CVCCV", "CVVC", "VCCV", "CVCVC"],
+            default=["CVCV", "CVCVC", "CVCCV", "CVCVCV", "CVCVVC", "CVVC", "VCCV", "CVCVCVVC"],
         )
 
         include_score = st.checkbox("Sisällytä score downloadiin (TAB-eroteltu)", value=True)
@@ -513,3 +537,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```0
