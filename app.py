@@ -4,7 +4,7 @@ import re
 import csv
 import zipfile
 from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple, List
+from typing import Iterable, Optional, Tuple, List, Dict, Set
 
 import streamlit as st
 
@@ -15,17 +15,15 @@ try:
 except Exception:
     _TLDX = None
 
-
 WORDLIST_FILE = "words_alpha.txt"
 
-
+# -------------------- WORDLIST --------------------
 @st.cache_resource
 def load_words(path: str) -> set[str]:
     with open(path, "r", encoding="utf-8") as f:
-        # yli 2 kirjainta, kuten sun skriptissä
         return set(w.strip().lower() for w in f if len(w.strip()) > 2)
 
-
+# -------------------- DOMAIN PARSING --------------------
 def get_sld_and_tld(domain: str) -> Tuple[Optional[str], Optional[str]]:
     d = domain.strip().lower().replace('"', "")
     d = re.sub(r"^https?://", "", d)
@@ -51,15 +49,12 @@ def get_sld_and_tld(domain: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
     return sld_clean, tld
 
-
+# -------------------- MATCH MODES --------------------
 def is_exact_word(sld: str, word_set: set[str]) -> bool:
     """Täsmäosuma: vain yksi sana, ei väliviivaa eikä yhdistelmiä."""
-    if not sld:
-        return False
-    if "-" in sld:
+    if not sld or "-" in sld:
         return False
     return sld in word_set
-
 
 def is_valid_english_combo(sld: str, word_set: set[str]) -> bool:
     """Laaja: yksi sana, väliviiva-yhdistelmä, tai kahden sanan concat."""
@@ -83,7 +78,7 @@ def is_valid_english_combo(sld: str, word_set: set[str]) -> bool:
 
     return False
 
-
+# -------------------- INPUT READING --------------------
 def iter_domains_from_text_bytes(data: bytes, suffix: str) -> Iterable[str]:
     # Domain oletetaan ensimmäiseksi sarakkeeksi (CSV) tai rivin alkuun (TXT)
     text = data.decode("utf-8", errors="ignore")
@@ -101,13 +96,11 @@ def iter_domains_from_text_bytes(data: bytes, suffix: str) -> Iterable[str]:
                 continue
             yield raw.split(",")[0].strip()
 
-
 @dataclass
 class FileItem:
     name: str
     suffix: str
     data: bytes
-
 
 def collect_inputs(uploaded_files) -> List[FileItem]:
     items: List[FileItem] = []
@@ -142,12 +135,12 @@ def collect_inputs(uploaded_files) -> List[FileItem]:
     items.sort(key=lambda x: x.name)
     return items
 
-
+# -------------------- STANDARD FILTER (EXACT/BROAD) --------------------
 def run_filter(files: List[FileItem], words: set[str], mode: str):
     """
     mode:
       - "exact": vain täsmäsanat
-      - "broad": nykyinen laaja logiikka
+      - "broad": sana / sana-sana / sanasana
     """
     results_com: List[str] = []
     results_others: List[str] = []
@@ -174,11 +167,7 @@ def run_filter(files: List[FileItem], words: set[str], mode: str):
             if full in seen:
                 continue
 
-            if mode == "exact":
-                ok = is_exact_word(sld, words)
-            else:
-                ok = is_valid_english_combo(sld, words)
-
+            ok = is_exact_word(sld, words) if mode == "exact" else is_valid_english_combo(sld, words)
             if not ok:
                 continue
 
@@ -191,7 +180,6 @@ def run_filter(files: List[FileItem], words: set[str], mode: str):
     progress.progress(1.0)
     status.write("Valmis.")
     return results_com, results_others, processed, len(files)
-
 
 def render_results(results_com: List[str], results_others: List[str], processed_lines: int, processed_files: int, label: str):
     st.subheader(f"Tulokset ({label})")
@@ -222,7 +210,194 @@ def render_results(results_com: List[str], results_others: List[str], processed_
         st.write("**others**")
         st.code("\n".join(results_others[:200]))
 
+# -------------------- BRANDABLES --------------------
+VOWELS = set("aeiouy")
 
+DEFAULT_ALLOWED_RUN_PATTERNS = [
+    # Tiivistetty C/V-runko (peräkkäiset samaan supistetaan)
+    "CV", "VC", "CVC", "VCV",
+    "CVCV", "VCVC",
+    "CVCVC", "VCVCV",
+    "CVCCV", "CCVCV",
+    "CVCVCV", "VCVCVC",
+]
+
+def cv_run_pattern(s: str) -> str:
+    """Muuntaa merkkijonon C/V-runkoiseksi ja tiivistää peräkkäiset samaan."""
+    out = []
+    prev = None
+    for ch in s:
+        cur = "V" if ch in VOWELS else "C"
+        if cur != prev:
+            out.append(cur)
+            prev = cur
+    return "".join(out)
+
+def has_repeated_chunk(s: str, chunk_min: int = 2, repeats: int = 3) -> bool:
+    """Etsii toistuvia paloja (kakaka/akakaka)."""
+    for n in range(chunk_min, min(4, len(s) // repeats) + 1):
+        if re.search(rf"(.{{{n}}})\1{{{repeats-1},}}", s):
+            return True
+    return False
+
+def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
+    """
+    Palauttaa (score, run_pattern). Score korkeampi = parempi.
+    """
+    s = s.lower()
+
+    if not s.isalpha():
+        return -999, ""
+    if len(s) < settings["min_len"] or len(s) > settings["max_len"]:
+        return -999, ""
+
+    # Ei väliviivoja brandables-tilassa (usein “vähemmän brandable”)
+    if "-" in s:
+        return -999, ""
+
+    # Jos halutaan nimenomaan ei-sanakirjaisia, hylätään oikeat sanat
+    if settings["reject_dictionary_words"] and s in settings["words"]:
+        return -999, ""
+
+    # Kova hylkäys: 3 samaa peräkkäin
+    if re.search(r"(.)\1\1", s):
+        return -999, ""
+
+    # Kova hylkäys: tavutoisto
+    if settings["reject_repeats"] and has_repeated_chunk(s, chunk_min=2, repeats=3):
+        return -999, ""
+
+    # Liian pieni diversiteetti (esim. {a,k})
+    if len(set(s)) < settings["min_unique_chars"]:
+        return -999, ""
+
+    run_pat = cv_run_pattern(s)
+
+    # Runko-rajoitin (tiivistetty)
+    allowed: Set[str] = settings["allowed_run_patterns"]
+    if allowed and run_pat not in allowed:
+        return -50, run_pat
+
+    score = 0
+
+    # Pituusbonus
+    if 5 <= len(s) <= 9:
+        score += 12
+    elif 4 <= len(s) <= 11:
+        score += 6
+    else:
+        score -= 8
+
+    # Vokaalisuhde
+    vcount = sum(1 for c in s if c in VOWELS)
+    v_ratio = vcount / len(s)
+    if settings["vowel_min"] <= v_ratio <= settings["vowel_max"]:
+        score += 25
+    elif (settings["vowel_min"] - 0.08) <= v_ratio <= (settings["vowel_max"] + 0.08):
+        score += 10
+    else:
+        score -= 18
+
+    # Konsonanttijonot
+    max_run = settings["max_consonant_run"]
+    if re.search(rf"[^{''.join(VOWELS)}]{{{max_run+1},}}", s):
+        score -= 30
+    elif re.search(rf"[^{''.join(VOWELS)}]{{{max_run},}}", s):
+        score -= 12
+
+    # Monotoninen CV-vuorottelu pitkästi (kakakaka)
+    full_pat = "".join("V" if c in VOWELS else "C" for c in s)
+    if re.search(r"(CV){4,}", full_pat) or re.search(r"(VC){4,}", full_pat):
+        score -= 18
+
+    # Bonus muutamille “usein hyviltä tuntuville” runkomuodoille
+    if run_pat in {"CVC", "CVCV", "CVCVC", "CVCCV"}:
+        score += 6
+
+    return score, run_pat
+
+def run_brandables(files: List[FileItem], words: set[str], settings: Dict):
+    # talletetaan words settingsiin (jotta voidaan reject_dictionary_words)
+    settings = dict(settings)
+    settings["words"] = words
+
+    results_com = []     # list of (domain, score, run_pat)
+    results_others = []  # list of (domain, score, run_pat)
+    seen: set[str] = set()
+
+    total_lines_est = max(1, sum(max(1, f.data.count(b"\n")) for f in files))
+    processed = 0
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    for fi in files:
+        status.write(f"Käsitellään: **{fi.name}**")
+        for raw in iter_domains_from_text_bytes(fi.data, fi.suffix):
+            processed += 1
+            if processed % 5000 == 0:
+                progress.progress(min(1.0, processed / total_lines_est))
+
+            sld, tld = get_sld_and_tld(raw)
+            if not sld or not tld:
+                continue
+
+            full = f"{sld}.{tld}"
+            if full in seen:
+                continue
+
+            score, run_pat = brandability_score(sld, settings)
+            if score < settings["score_threshold"]:
+                continue
+
+            seen.add(full)
+            item = (full, score, run_pat)
+            if tld == "com":
+                results_com.append(item)
+            else:
+                results_others.append(item)
+
+    # Paras ensin
+    results_com.sort(key=lambda x: x[1], reverse=True)
+    results_others.sort(key=lambda x: x[1], reverse=True)
+
+    progress.progress(1.0)
+    status.write("Valmis.")
+    return results_com, results_others, processed, len(files)
+
+def render_brandables(res_com, res_oth, processed_lines: int, processed_files: int, include_score: bool):
+    st.subheader("Tulokset (brandables)")
+    st.write(f"Käsitelty tiedostoja: **{processed_files}**")
+    st.write(f"Käsitelty rivejä (arvioitu domain-riveiksi): **{processed_lines}**")
+    st.write(f"Löydetyt .com: **{len(res_com)}**")
+    st.write(f"Löydetyt muut: **{len(res_oth)}**")
+
+    def to_text(rows):
+        if include_score:
+            # domain<TAB>score<TAB>run_pattern
+            return "\n".join([f"{d}\t{sc}\t{pat}" for (d, sc, pat) in rows]).encode("utf-8")
+        return "\n".join([d for (d, _, _) in rows]).encode("utf-8")
+
+    st.download_button(
+        "Lataa results_com_brandables.txt",
+        data=to_text(res_com),
+        file_name="results_com_brandables.txt",
+        mime="text/plain",
+    )
+    st.download_button(
+        "Lataa results_others_brandables.txt",
+        data=to_text(res_oth),
+        file_name="results_others_brandables.txt",
+        mime="text/plain",
+    )
+
+    with st.expander("Näytä esikatselu (top 100)"):
+        st.write("**.com**")
+        st.code("\n".join([f"{d}  (score={sc}, {pat})" for (d, sc, pat) in res_com[:100]]))
+        st.write("**others**")
+        st.code("\n".join([f"{d}  (score={sc}, {pat})" for (d, sc, pat) in res_oth[:100]]))
+
+# -------------------- UI --------------------
 def main():
     st.set_page_config(page_title="Domain Filter", layout="centered")
     st.title("Domain-seulonta (Streamlit)")
@@ -241,7 +416,6 @@ def main():
         type=["csv", "txt", "zip"],
         accept_multiple_files=True,
     )
-
     if not uploaded:
         st.stop()
 
@@ -252,19 +426,59 @@ def main():
 
     st.write(f"Tiedostoja käsittelyyn: **{len(files)}** (aakkosjärjestyksessä)")
 
-    col1, col2 = st.columns(2)
+    st.markdown("### Ajotavat")
+
+    with st.expander("Brandables-asetukset", expanded=False):
+        score_threshold = st.slider("Score-kynnys", min_value=-20, max_value=80, value=20, step=1)
+        min_len = st.slider("Min pituus", 3, 12, 5, 1)
+        max_len = st.slider("Max pituus", 4, 20, 10, 1)
+        vowel_min = st.slider("Vokaalisuhde min", 0.10, 0.70, 0.33, 0.01)
+        vowel_max = st.slider("Vokaalisuhde max", 0.20, 0.85, 0.60, 0.01)
+        max_consonant_run = st.slider("Max konsonanttijono (C-run)", 2, 5, 3, 1)
+        min_unique_chars = st.slider("Min uniikkeja kirjaimia", 3, 8, 5, 1)
+        reject_repeats = st.checkbox("Hylkää toistot (akakaka-tyyppiset)", value=True)
+        reject_dictionary_words = st.checkbox("Hylkää oikeat sanakirjasanat (etsi vain 'keksittyjä')", value=False)
+
+        allowed = st.multiselect(
+            "Sallitut tiivistetyt C/V-runko-variantit (esim. CVCV)",
+            options=DEFAULT_ALLOWED_RUN_PATTERNS,
+            default=["CVC", "CVCV", "CVCVC", "CVCCV", "CCVCV"],
+        )
+
+        include_score = st.checkbox("Sisällytä score downloadiin (TAB-eroteltu)", value=True)
+
+    brand_settings = {
+        "score_threshold": score_threshold,
+        "min_len": min_len,
+        "max_len": max_len,
+        "vowel_min": vowel_min,
+        "vowel_max": vowel_max,
+        "max_consonant_run": max_consonant_run,
+        "min_unique_chars": min_unique_chars,
+        "reject_repeats": reject_repeats,
+        "reject_dictionary_words": reject_dictionary_words,
+        "allowed_run_patterns": set(allowed),
+    }
+
+    col1, col2, col3 = st.columns(3)
     run_exact = col1.button("Aja TÄSMÄ", type="primary")
     run_broad = col2.button("Aja LAAJA")
+    run_brand = col3.button("Aja BRANDABLES")
 
-    if run_exact or run_broad:
-        mode = "exact" if run_exact else "broad"
-        label = "exact" if run_exact else "broad"
+    if run_exact:
+        with st.spinner("Seulotaan (täsmä)..."):
+            results_com, results_others, processed_lines, processed_files = run_filter(files, words, mode="exact")
+        render_results(results_com, results_others, processed_lines, processed_files, label="exact")
 
-        with st.spinner("Seulotaan..."):
-            results_com, results_others, processed_lines, processed_files = run_filter(files, words, mode=mode)
+    if run_broad:
+        with st.spinner("Seulotaan (laaja)..."):
+            results_com, results_others, processed_lines, processed_files = run_filter(files, words, mode="broad")
+        render_results(results_com, results_others, processed_lines, processed_files, label="broad")
 
-        render_results(results_com, results_others, processed_lines, processed_files, label=label)
-
+    if run_brand:
+        with st.spinner("Seulotaan (brandables)..."):
+            res_com, res_oth, processed_lines, processed_files = run_brandables(files, words, brand_settings)
+        render_brandables(res_com, res_oth, processed_lines, processed_files, include_score=include_score)
 
 if __name__ == "__main__":
     main()
