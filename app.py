@@ -222,6 +222,16 @@ DEFAULT_ALLOWED_RUN_PATTERNS = [
     "CVCVCV", "VCVCVC",
 ]
 
+# Tiukennukset: harvinaiset kirjaimet ja huonot bigramit
+RARE_LETTERS = set("qxzj")
+DISALLOW_START = set("qx")
+DISALLOW_END = set("qx")
+BAD_BIGRAMS = {
+    "qx", "xq", "qj", "jq", "qz", "zq",
+    "wx", "xw", "vj", "jv", "zx", "xz",
+    "qh", "qk", "qc", "qg", "qt", "qd", "qb",
+}
+
 def cv_run_pattern(s: str) -> str:
     """Muuntaa merkkijonon C/V-runkoiseksi ja tiivistää peräkkäiset samaan."""
     out = []
@@ -251,13 +261,24 @@ def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
     if len(s) < settings["min_len"] or len(s) > settings["max_len"]:
         return -999, ""
 
-    # Ei väliviivoja brandables-tilassa (usein “vähemmän brandable”)
+    # Ei väliviivoja brandables-tilassa
     if "-" in s:
         return -999, ""
 
     # Jos halutaan nimenomaan ei-sanakirjaisia, hylätään oikeat sanat
     if settings["reject_dictionary_words"] and s in settings["words"]:
         return -999, ""
+
+    # ---- STRICT: hylkää q/x/z/j ja rumat bigramit ----
+    rare_count = sum(1 for ch in s if ch in RARE_LETTERS)
+    if rare_count > settings["max_rare_letters"]:
+        return -999, ""
+
+    if settings["strict_brandables"]:
+        if s[0] in DISALLOW_START or s[-1] in DISALLOW_END:
+            return -999, ""
+        if any((s[i:i+2] in BAD_BIGRAMS) for i in range(len(s) - 1)):
+            return -999, ""
 
     # Kova hylkäys: 3 samaa peräkkäin
     if re.search(r"(.)\1\1", s):
@@ -287,6 +308,9 @@ def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
         score += 6
     else:
         score -= 8
+
+    # Pehmeä penalti harvinaisille kirjaimille (vaikka sallittaisiin)
+    score -= 10 * rare_count
 
     # Vokaalisuhde
     vcount = sum(1 for c in s if c in VOWELS)
@@ -439,6 +463,15 @@ def main():
         reject_repeats = st.checkbox("Hylkää toistot (akakaka-tyyppiset)", value=True)
         reject_dictionary_words = st.checkbox("Hylkää oikeat sanakirjasanat (etsi vain 'keksittyjä')", value=False)
 
+        strict_brandables = st.checkbox("Strict brandables (hylkää q/x/z/j ja rumat bigramit)", value=True)
+        max_rare_letters = st.slider(
+            "Max harvinaisia kirjaimia (q/x/z/j)",
+            min_value=0,
+            max_value=2,
+            value=0 if strict_brandables else 1,
+            step=1,
+        )
+
         allowed = st.multiselect(
             "Sallitut tiivistetyt C/V-runko-variantit (esim. CVCV)",
             options=DEFAULT_ALLOWED_RUN_PATTERNS,
@@ -458,6 +491,8 @@ def main():
         "reject_repeats": reject_repeats,
         "reject_dictionary_words": reject_dictionary_words,
         "allowed_run_patterns": set(allowed),
+        "strict_brandables": strict_brandables,
+        "max_rare_letters": max_rare_letters,
     }
 
     col1, col2, col3 = st.columns(3)
