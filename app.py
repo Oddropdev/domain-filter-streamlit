@@ -3,6 +3,7 @@ import io
 import re
 import csv
 import zipfile
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Iterable, Optional, Tuple, List, Dict, Set
 
@@ -25,10 +26,28 @@ def load_words(path: str) -> set[str]:
 
 # -------------------- DOMAIN PARSING --------------------
 def get_sld_and_tld(domain: str) -> Tuple[Optional[str], Optional[str]]:
-    d = domain.strip().lower().replace('"', "")
-    d = re.sub(r"^https?://", "", d)
+    d = domain.strip().lower().strip('"').strip("'")
+    if re.match(r"^https?://", d):
+        # Keep URL ports separate from the hostname. Digits in a numeric
+        # port are metadata, not domain-label characters.
+        try:
+            parsed = urlsplit(d)
+            if parsed.hostname is None:
+                return None, None
+            _ = parsed.port  # Reject invalid/non-numeric port values.
+            d = parsed.hostname
+        except ValueError:
+            return None, None
+    else:
+        # Raw domain lists may also include a copied URL path.
+        d = re.split(r"[/?#]", d, maxsplit=1)[0]
     if d.startswith("www."):
         d = d[4:]
+
+    # Validate before public-suffix extraction. Never silently rewrite
+    # brand123.com into brand.com, or brand-name.com into brandname.com.
+    if re.fullmatch(r"[a-z]+(?:\.[a-z]+)+", d) is None:
+        return None, None
 
     if _TLDX is not None:
         ext = _TLDX(d)
@@ -43,35 +62,27 @@ def get_sld_and_tld(domain: str) -> Tuple[Optional[str], Optional[str]]:
         tld = parts[-1]
         sld = parts[-2]
 
-    # Puhdista sld kaikesta paitsi a-z ja -
-    sld_clean = re.sub(r"[^a-z\-]", "", sld)
-    if not sld_clean or not tld:
+    if not sld or not tld:
         return None, None
-    return sld_clean, tld
+    return sld, tld
 
 # -------------------- MATCH MODES --------------------
 def is_exact_word(sld: str, word_set: set[str]) -> bool:
     """Täsmäosuma: vain yksi sana, ei väliviivaa eikä yhdistelmiä."""
-    if not sld or "-" in sld:
+    if re.fullmatch(r"[a-z]+", sld) is None:
         return False
     return sld in word_set
 
 def is_valid_english_combo(sld: str, word_set: set[str]) -> bool:
-    """Laaja: yksi sana, väliviiva-yhdistelmä, tai kahden sanan concat."""
-    if not sld:
+    """Laaja: yksi sana tai kahden sanan concat; vain a-z-kirjaimia."""
+    if re.fullmatch(r"[a-z]+", sld) is None:
         return False
 
     # 1) Yksi sana
     if sld in word_set:
         return True
 
-    # 2) Väliviiva (word-word)
-    if "-" in sld:
-        parts = [p for p in sld.split("-") if p]
-        if len(parts) >= 2 and all(p in word_set for p in parts):
-            return True
-
-    # 3) Kahden sanan concat (wordword)
+    # 2) Kahden sanan concat (wordword)
     for i in range(3, len(sld) - 2):
         if sld[:i] in word_set and sld[i:] in word_set:
             return True
@@ -140,7 +151,7 @@ def run_filter(files: List[FileItem], words: set[str], mode: str):
     """
     mode:
       - "exact": vain täsmäsanat
-      - "broad": sana / sana-sana / sanasana
+      - "broad": sana / sanasana (ei väliviivoja)
     """
     results_com: List[str] = []
     results_others: List[str] = []
@@ -260,7 +271,7 @@ def brandability_score(s: str, settings: Dict) -> Tuple[int, str]:
     """
     s = s.lower()
 
-    if not s.isalpha():
+    if re.fullmatch(r"[a-z]+", s) is None:
         return -999, ""
     if len(s) < settings["min_len"] or len(s) > settings["max_len"]:
         return -999, ""
@@ -441,6 +452,7 @@ def main():
     st.set_page_config(page_title="Domain Filter", layout="centered")
     st.title("Domain-seulonta (Streamlit)")
     st.caption("Upload: useita .csv/.txt tai yksi .zip (sisällä .csv/.txt). Tuloksena .com ja muut erikseen.")
+    st.caption("Vain a–z-kirjaimet domainnimissä. Numerot, väliviivat ja erikoismerkit hylätään kaikissa ajotavoissa.")
 
     try:
         words = load_words(WORDLIST_FILE)
