@@ -13,6 +13,8 @@ def parse(value: str):
 def test_valid_domains_and_urls():
     assert parse("Example.COM") == ("example", "com")
     assert parse("https://www.realm.sh/path?q=1") == ("realm", "sh")
+    assert parse("https://cat.com:443/path") == ("cat", "com")
+    assert parse("http://cat.com:8080?q=1") == ("cat", "com")
     assert parse("safe.co.uk") == ("co", "uk")  # pre-existing no-PSL fallback
 
 
@@ -21,7 +23,8 @@ def test_invalid_names_are_rejected_instead_of_modified():
         "brand123.com", "brand-name.com", "brand_name.com",
         "brand+name.com", "näme.com", "abc..com", "brand.com-xyz",
         "123.brand.com", "x.com_foo", "br!and.com", "brand.c0m",
-        "ｂｒａｎｄ.com",
+        "ｂｒａｎｄ.com", "https://cat123.com:443/path",
+        "https://cat.com:invalid/path",
     ]:
         assert parse(bad) == (None, None), bad
 
