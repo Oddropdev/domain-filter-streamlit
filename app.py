@@ -134,7 +134,17 @@ def iter_domains_from_text_bytes(data: bytes, suffix: str) -> Iterable[str]:
         if first is None:
             return
         names = [re.sub(r"[^a-z]", "", item.strip().lower()) for item in first]
+        # Explicit domain headers take priority over generic labels.
         domain_column = next((i for i, name in enumerate(names) if name in DOMAIN_COLUMNS), None)
+        # Namecheap Market Sales exports use "url" for the auction listing
+        # and "name" for the actual domain being sold. Without this binding,
+        # all rows incorrectly resolve to namecheap.com from the URL column.
+        if (
+            domain_column is None
+            and "name" in names
+            and {"url", "enddate", "price"}.issubset(names)
+        ):
+            domain_column = names.index("name")
         if domain_column is None:
             yield _domain_candidate_from_fields(first)
         for row in reader:
