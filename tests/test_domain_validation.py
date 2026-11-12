@@ -79,3 +79,81 @@ def test_brandables_pipeline_rejects_invalid_names_before_scoring():
         com, other, _, _ = app.run_brandables([fi], set(), settings)
     assert [domain for domain, _, _ in com] == ["maven.com"]
     assert other == []
+
+
+def test_csv_header_domain_column_is_used_even_when_other_websites_appear_first():
+    data = (
+        "Source URL,Rank,Domain Name,Price\n"
+        "https://auctionhouse.com/listing,1,cat.com,12.99\n"
+        "https://auctionhouse.com/listing,2,cat123.com,9.99\n"
+    ).encode()
+    records = list(app.iter_domains_from_text_bytes(data, ".csv"))
+    assert records == ["cat.com", "cat123.com"]
+
+
+def test_csv_without_headers_finds_first_complete_domain_after_id_and_price():
+    data = b"123,19.99,cat.com\n124,2.99,cat-name.com\n"
+    records = list(app.iter_domains_from_text_bytes(data, ".csv"))
+    assert records == ["cat.com", "cat-name.com"]
+
+
+def test_semicolon_and_tab_delimited_exports_are_supported():
+    semicolon = b"id;domain;price\n1;cat.com;19.99\n2;cat123.com;12.99\n"
+    tab = b"id\tdomain\tprice\n1\tcat.com\t19.99\n"
+    assert list(app.iter_domains_from_text_bytes(semicolon, ".csv")) == ["cat.com", "cat123.com"]
+    assert list(app.iter_domains_from_text_bytes(tab, ".csv")) == ["cat.com"]
+
+
+def test_txt_lines_with_auction_metadata_extract_complete_domain_tokens():
+    data = (
+        "12345 cat.com $12.99 auction\n"
+        "12346 cat123.com $12.99 auction\n"
+        "12347 cat-name.com | 3 bids\n"
+        "12348 cat_name.com,5.99\n"
+        "12349 https://www.dog.com:443/auction 10.00\n"
+    ).encode()
+    records = list(app.iter_domains_from_text_bytes(data, ".txt"))
+    assert records == [
+        "cat.com", "cat123.com", "cat-name.com", "cat_name.com",
+        "https://www.dog.com:443/auction",
+    ]
+
+
+def test_csv_first_row_is_not_lost_if_it_has_no_header():
+    data = b"cat.com,19.99\ndog.com,29.99\n"
+    assert list(app.iter_domains_from_text_bytes(data, ".csv")) == ["cat.com", "dog.com"]
+
+
+def test_auction_export_exact_mode_finds_matches_but_never_repairs_bad_names():
+    data = (
+        "ID,Price,Domain Name\n"
+        "123,19.99,cat.com\n"
+        "124,2.99,cat123.com\n"
+        "125,2.99,cat-name.com\n"
+        "126,2.99,cat_name.com\n"
+        "127,2.99,dog.com\n"
+    ).encode()
+    fi = app.FileItem("auction.csv", ".csv", data)
+    with patch.object(app, "_TLDX", None), patch.object(app.st, "progress"), patch.object(app.st, "empty"):
+        com, others, processed, count = app.run_filter([fi], {"cat", "dog"}, "exact")
+    assert com == ["cat.com", "dog.com"]
+    assert others == []
+    assert processed == 5
+    assert count == 1
+
+
+def test_quoted_csv_fields_are_supported():
+    data = b'"Domain Name","Price"\n"cat.com","12.99"\n"cat123.com","10.00"\n'
+    assert list(app.iter_domains_from_text_bytes(data, ".csv")) == ["cat.com", "cat123.com"]
+
+
+def test_non_domain_prices_are_not_counted_as_candidates():
+    data = b"12.99 10.50 no-domains-here\n20.00 5.30\n"
+    assert list(app.iter_domains_from_text_bytes(data, ".txt")) == ["", ""]
+
+
+def test_export_parser_does_not_salvage_domain_substrings():
+    data = b"123,cat123.com\n124,cat-name.com\n125,cat_name.com\n126,cat.com\n"
+    records = list(app.iter_domains_from_text_bytes(data, ".txt"))
+    assert records == ["cat123.com", "cat-name.com", "cat_name.com", "cat.com"]
+    assert [parse(x) for x in records] == [(None, None)] * 3 + [("cat", "com")]

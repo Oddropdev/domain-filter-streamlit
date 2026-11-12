@@ -90,22 +90,65 @@ def is_valid_english_combo(sld: str, word_set: set[str]) -> bool:
     return False
 
 # -------------------- INPUT READING --------------------
-def iter_domains_from_text_bytes(data: bytes, suffix: str) -> Iterable[str]:
-    # Domain oletetaan ensimmäiseksi sarakkeeksi (CSV) tai rivin alkuun (TXT)
-    text = data.decode("utf-8", errors="ignore")
+# Identify complete domain tokens, then validate every hostname label.
+# Never strip invalid characters from within the candidate name.
+DOMAIN_TOKEN_RE = re.compile(
+    r"(?i)^(?:https?://)?(?:www\.)?"
+    r"([^\s/.@:,?&#]+(?:\.[^\s/.@:,?&#]+)+)"
+    r"(?::\d{1,5})?(?:[/?#][^\s]*)?$"
+)
+DOMAIN_COLUMNS = {"domain", "domainname", "hostname", "fqdn", "domainurl"}
 
+
+def _domain_candidate_from_fields(fields: Iterable[str]) -> str:
+    """Read the first full domain-looking token across columns or notes."""
+    for field in fields:
+        for token in re.split(r"[\s,;|]+", field):
+            candidate = token.strip().strip("\"'[]()<>").rstrip(".")
+            match = DOMAIN_TOKEN_RE.fullmatch(candidate)
+            if not match:
+                continue
+            # A decimal price such as 12.99 is not a domain candidate.
+            last_label = match.group(1).rsplit(".", 1)[-1]
+            if any(char.isalpha() for char in last_label):
+                return candidate
+    return ""
+
+
+def iter_domains_from_text_bytes(data: bytes, suffix: str) -> Iterable[str]:
+    """Read domain lists and multi-column registrar exports without rewriting names.
+
+    Recognized CSV domain headers take precedence over any prices, IDs or
+    source URLs. Otherwise use the first whole domain-looking token in each
+    record. Plain TXT exports may contain whitespace, comma, semicolon, tab
+    or pipe-separated metadata on the same line.
+    """
+    text = data.decode("utf-8-sig", errors="replace")
     if suffix.lower() == ".csv":
-        reader = csv.reader(io.StringIO(text))
+        try:
+            dialect = csv.Sniffer().sniff(text[:16384], delimiters=",;\t|")
+            reader = csv.reader(io.StringIO(text, newline=""), dialect=dialect)
+        except csv.Error:
+            reader = csv.reader(io.StringIO(text, newline=""))
+        first = next(reader, None)
+        if first is None:
+            return
+        names = [re.sub(r"[^a-z]", "", item.strip().lower()) for item in first]
+        domain_column = next((i for i, name in enumerate(names) if name in DOMAIN_COLUMNS), None)
+        if domain_column is None:
+            yield _domain_candidate_from_fields(first)
         for row in reader:
             if not row:
                 continue
-            yield row[0].strip()
+            if domain_column is not None:
+                value = row[domain_column] if domain_column < len(row) else ""
+                yield _domain_candidate_from_fields([value])
+            else:
+                yield _domain_candidate_from_fields(row)
     else:
         for line in text.splitlines():
-            raw = line.strip()
-            if not raw:
-                continue
-            yield raw.split(",")[0].strip()
+            if line.strip():
+                yield _domain_candidate_from_fields([line])
 
 @dataclass
 class FileItem:
@@ -159,6 +202,7 @@ def run_filter(files: List[FileItem], words: set[str], mode: str):
 
     total_lines_est = max(1, sum(max(1, f.data.count(b"\n")) for f in files))
     processed = 0
+    valid_domains = 0
 
     progress = st.progress(0)
     status = st.empty()
@@ -174,6 +218,7 @@ def run_filter(files: List[FileItem], words: set[str], mode: str):
             if not sld or not tld:
                 continue
 
+            valid_domains += 1
             full = f"{sld}.{tld}"
             if full in seen:
                 continue
@@ -190,6 +235,7 @@ def run_filter(files: List[FileItem], words: set[str], mode: str):
 
     progress.progress(1.0)
     status.write("Valmis.")
+    st.session_state["last_exact_broad_valid_domains"] = valid_domains
     return results_com, results_others, processed, len(files)
 
 def render_results(results_com: List[str], results_others: List[str], processed_lines: int, processed_files: int, label: str):
@@ -198,6 +244,13 @@ def render_results(results_com: List[str], results_others: List[str], processed_
     st.write(f"Käsitelty rivejä (arvioitu domain-riveiksi): **{processed_lines}**")
     st.write(f"Löydetyt .com: **{len(results_com)}**")
     st.write(f"Löydetyt muut: **{len(results_others)}**")
+    valid_domains = st.session_state.get("last_exact_broad_valid_domains")
+    if valid_domains is not None:
+        st.write(f"Kelvollisiksi tunnistetut domain-rivit: **{valid_domains}**")
+        if valid_domains == 0:
+            st.warning("Yhtään kelvollista domainia ei tunnistettu. Tarkista tiedoston sarakkeet ja formaatti.")
+        elif not results_com and not results_others:
+            st.info("Domainit tunnistettiin, mutta yksikään ei vastannut valittua sanakirjasuodatusta.")
 
     com_text = "\n".join(results_com).encode("utf-8")
     others_text = "\n".join(results_others).encode("utf-8")
@@ -377,6 +430,7 @@ def run_brandables(files: List[FileItem], words: set[str], settings: Dict):
 
     total_lines_est = max(1, sum(max(1, f.data.count(b"\n")) for f in files))
     processed = 0
+    valid_domains = 0
 
     progress = st.progress(0)
     status = st.empty()
@@ -392,6 +446,7 @@ def run_brandables(files: List[FileItem], words: set[str], settings: Dict):
             if not sld or not tld:
                 continue
 
+            valid_domains += 1
             full = f"{sld}.{tld}"
             if full in seen:
                 continue
@@ -413,6 +468,7 @@ def run_brandables(files: List[FileItem], words: set[str], settings: Dict):
 
     progress.progress(1.0)
     status.write("Valmis.")
+    st.session_state["last_brandable_valid_domains"] = valid_domains
     return results_com, results_others, processed, len(files)
 
 def render_brandables(res_com, res_oth, processed_lines: int, processed_files: int, include_score: bool):
