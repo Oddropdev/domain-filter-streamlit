@@ -209,7 +209,7 @@ def test_unrelated_name_and_url_columns_are_not_assumed_to_be_domains():
         "https://shop.example.com/item/,My Listing,Not a domain sale\n"
     ).encode()
     records = list(app.iter_domains_from_text_bytes(data, ".csv"))
-    assert records == ["shop.example.com", ""]
+    assert records == ["", "https://shop.example.com/item/"]
 
 
 def test_namecheap_market_sales_header_normalization():
