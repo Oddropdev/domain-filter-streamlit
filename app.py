@@ -3,6 +3,7 @@ import io
 import re
 import csv
 import zipfile
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Iterable, Optional, Tuple, List, Dict, Set
 
@@ -25,10 +26,21 @@ def load_words(path: str) -> set[str]:
 
 # -------------------- DOMAIN PARSING --------------------
 def get_sld_and_tld(domain: str) -> Tuple[Optional[str], Optional[str]]:
-    d = domain.strip().lower().strip('"')
-    d = re.sub(r"^https?://", "", d)
-    # URL paths and queries are metadata; only validate the hostname.
-    d = re.split(r"[/?#]", d, maxsplit=1)[0]
+    d = domain.strip().lower().strip('"').strip("'")
+    if re.match(r"^https?://", d):
+        # Keep URL ports separate from the hostname. Digits in a numeric
+        # port are metadata, not domain-label characters.
+        try:
+            parsed = urlsplit(d)
+            if parsed.hostname is None:
+                return None, None
+            _ = parsed.port  # Reject invalid/non-numeric port values.
+            d = parsed.hostname
+        except ValueError:
+            return None, None
+    else:
+        # Raw domain lists may also include a copied URL path.
+        d = re.split(r"[/?#]", d, maxsplit=1)[0]
     if d.startswith("www."):
         d = d[4:]
 
