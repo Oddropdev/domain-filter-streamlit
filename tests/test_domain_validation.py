@@ -157,3 +157,64 @@ def test_export_parser_does_not_salvage_domain_substrings():
     records = list(app.iter_domains_from_text_bytes(data, ".txt"))
     assert records == ["cat123.com", "cat-name.com", "cat_name.com", "cat.com"]
     assert [parse(x) for x in records] == [(None, None)] * 3 + [("cat", "com")]
+
+
+def test_namecheap_market_sales_header_uses_name_not_auction_url():
+    data = (
+        "url,name,endDate,price,startPrice,renewPrice,bidCount\n"
+        "https://www.namecheap.com/market/sale/abc123/,dream.film,2026-11-14T16:00:00Z,1.00,1.00,97.98,1\n"
+        "https://www.namecheap.com/market/sale/def456/,bank.express,2026-11-15T16:00:00Z,1.00,1.00,19.98,1\n"
+        "https://www.namecheap.com/market/sale/ghi789/,marvel78.com,2026-11-15T16:00:00Z,1.00,1.00,19.98,1\n"
+        "https://www.namecheap.com/market/sale/jkl987/,brand-name.com,2026-11-15T16:00:00Z,1.00,1.00,19.98,1\n"
+    ).encode()
+    records = list(app.iter_domains_from_text_bytes(data, ".csv"))
+    assert records == [
+        "dream.film", "bank.express", "marvel78.com", "brand-name.com",
+    ]
+    assert "namecheap.com" not in records
+
+
+def test_namecheap_market_sales_exact_filter_finds_real_domains():
+    data = (
+        "url,name,endDate,price,startPrice\n"
+        "https://www.namecheap.com/market/sale/abc/,dream.film,2026-11-14T16:00:00Z,1.00,1.00\n"
+        "https://www.namecheap.com/market/sale/def/,bank.express,2026-11-14T16:00:00Z,1.00,1.00\n"
+        "https://www.namecheap.com/market/sale/ghi/,marvel78.com,2026-11-14T16:00:00Z,1.00,1.00\n"
+        "https://www.namecheap.com/market/sale/jkl/,brand-name.com,2026-11-14T16:00:00Z,1.00,1.00\n"
+    ).encode()
+    fi = app.FileItem("Namecheap_Market_Sales.csv", ".csv", data)
+    with patch.object(app, "_TLDX", None), patch.object(app.st, "progress"), patch.object(app.st, "empty"):
+        com, others, processed, files = app.run_filter(
+            [fi], {"dream", "bank", "marvel", "brand"}, "exact"
+        )
+    assert com == []
+    assert others == ["dream.film", "bank.express"]
+    assert processed == 4
+    assert files == 1
+    assert app.st.session_state["last_exact_broad_valid_domains"] == 2
+
+
+def test_explicit_domain_header_wins_over_generic_name_header():
+    data = (
+        "url,name,domain,price\n"
+        "https://auction.example.com/sale/,auctiontitle.com,cat.com,12.00\n"
+    ).encode()
+    records = list(app.iter_domains_from_text_bytes(data, ".csv"))
+    assert records == ["cat.com"]
+
+
+def test_unrelated_name_and_url_columns_are_not_assumed_to_be_domains():
+    data = (
+        "url,name,description\n"
+        "https://shop.example.com/item/,My Listing,Not a domain sale\n"
+    ).encode()
+    records = list(app.iter_domains_from_text_bytes(data, ".csv"))
+    assert records == ["shop.example.com", ""]
+
+
+def test_namecheap_market_sales_header_normalization():
+    data = (
+        "URL,Name,End Date,Price,Start Price\n"
+        "https://www.namecheap.com/market/sale/abc/,news.forum,2026-11-14,1.00,1.00\n"
+    ).encode()
+    assert list(app.iter_domains_from_text_bytes(data, ".csv")) == ["news.forum"]
